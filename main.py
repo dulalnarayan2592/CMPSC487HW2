@@ -27,22 +27,40 @@ database = firestore.client()
 def retrieve_reservation():
     return database.collection('Reservations').get()
 
-# Function to check reservations overlaps
+    # Function to check for reservation conflicts
 def check_conflicting_reservations(car_type, new_reservation_start, new_reservation_end):
-    reservations = retrieve_reservation()
-    for reservation in reservations:
-        data = reservation.to_dict()
-        existing_start = data['reservation_date'].replace(tzinfo = None)
-        existing_end = data['return_date'].replace(tzinfo = None)
+        reservations = retrieve_reservation()  # Get all reservations from Firestore
 
-        # Check if the car type matches and if the new reservation overlaps with the existing one
-        if data['car_type'] == car_type and (
-            (existing_start <= new_reservation_end and existing_end >= new_reservation_start)
-        ):
-            return True  # Overlap found
-    return False  # No overlap
+        print(f"Checking conflicts for Car Type: {car_type} from {new_reservation_start} to {new_reservation_end}")
 
-# Function to retrieve rental charges from Firestore collection
+        for reservation in reservations:
+            data = reservation.to_dict()
+
+            # Convert Firestore timestamps to datetime objects if needed
+            existing_start = data['reservation_date']
+            existing_end = data['return_date']
+
+            # Ensure the Firestore timestamps are converted to naive datetime
+            if isinstance(existing_start, datetime):
+                existing_start = existing_start.replace(tzinfo=None)
+            if isinstance(existing_end, datetime):
+                existing_end = existing_end.replace(tzinfo=None)
+
+            # Debug: Print each existing reservation's details
+            print(f"Checking existing reservation: {data['name']} ({data['car_type']}) "
+                  f"from {existing_start} to {existing_end}")
+
+            # Ensure car types match (strip spaces to avoid subtle issues)
+            if data['car_type'].strip() == car_type.strip():
+                # Check if the new reservation overlaps with the existing one
+                if not (new_reservation_end <= existing_start or new_reservation_start >= existing_end):
+                    print("Conflict detected!")
+                    return True  # Conflict found
+
+        print("No conflicts found.")
+        return False  # No conflict
+
+        # Function to retrieve rental charges from Firestore collection
 def get_car_charges():
     charges = {}
     car_types = database.collection('CarTypes').get()
@@ -118,7 +136,7 @@ class ReservationForm(Screen):
         admin_button = Button(text = "Admin View", on_press = self.go_to_admin)
         layout.add_widget(admin_button)
 
-        # **Add the layout to the screen**
+        # Add the layout to the screen
         self.add_widget(layout)
 
     def submit_reservation(self, instance):
@@ -142,31 +160,29 @@ class ReservationForm(Screen):
             show_popup("Error", "Invalid date/time format.")
             return
 
-        # Check if reservation is at least 24 hours in advance
-        if reservation_datetime - datetime.now() < timedelta(hours=24):
+        # **Check if reservation is at least 24 hours in advance**
+        if reservation_datetime - datetime.now() < timedelta(hours = 24):
             show_popup("Error", "Reservations must be made at least 24 hours in advance.")
             return
 
-        # **Retrieve rental charges from Firestore**
-        charges = get_car_charges()  # Retrieve charges from Firestore
-        print(f"Charges retrieved: {charges}")
-        print(f"Selected Car Type: {car_type}")
+        # **Check for conflicting reservations before proceeding**
+        if check_conflicting_reservations(car_type, reservation_datetime, return_datetime):
+            show_popup("Error", "This reservation conflicts with an existing one.")
+            return
 
+        # Retrieve rental charges from Firestore
+        charges = get_car_charges()  # Retrieve charges from Firestore
         charge_per_day = charges.get(car_type, 0)  # Get the charge for the selected car type
-        print(f"Charge per day for {car_type}: {charge_per_day}")
 
         # **Calculate rental duration in days**
         rental_days = (return_datetime - reservation_datetime).days + 1
-        print(f"Rental days: {rental_days}")
 
-        # **Apply discount for rentals of 7 days or more**
+        # Apply discount for rentals of 7 days or more
         total_charge = charge_per_day * rental_days
         if rental_days >= 7:
             total_charge *= 0.9  # 10% discount
 
-        print(f"Total Charge Calculated: {total_charge}")
-
-        # **Add the reservation to Firestore**
+        # Add the reservation to Firestore
         database.collection('Reservations').add({
             'name': name,
             'car_type': car_type,
@@ -176,13 +192,14 @@ class ReservationForm(Screen):
             'total_charge': total_charge  # Store the calculated total charge
         })
 
+        # Show success popup
         show_popup("Success", f"Reservation made for {name}. Total charge: ${total_charge:.2f}.")
 
-    # **Navigate to Admin View**
+    # Navigate to Admin View
     def go_to_admin(self, instance):
         self.manager.current = 'admin_view'
 
-# **Admin View Screen**
+# Admin View Screen
 class AdminView(Screen):
     def __init__(self, **kwargs):
         super(AdminView, self).__init__(**kwargs)
@@ -200,14 +217,14 @@ class AdminView(Screen):
         title_label.bind(size = title_label.setter('text_size'))
         layout.add_widget(title_label)
 
-        # **Scrollable view for reservations**
+        # Scrollable view for reservations
         scroll_view = ScrollView(size_hint = (1, 1))
         self.reservations_layout = GridLayout(cols = 1, size_hint_y = None, spacing = 20, padding = 20)
         self.reservations_layout.bind(minimum_height=self.reservations_layout.setter('height'))
         scroll_view.add_widget(self.reservations_layout)
         layout.add_widget(scroll_view)
 
-        # **Refresh and Back buttons**
+        # Refresh and Back buttons
         buttons_layout = BoxLayout(orientation = 'horizontal', size_hint = (1, None), height = 60)
         refresh_button = Button(text = "Refresh Reservations", size_hint = (0.5, 1))
         refresh_button.bind(on_press = self.view_reservations)
